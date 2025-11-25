@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class WalletConfig(BaseModel):
@@ -47,17 +53,57 @@ class NetworkConfig(BaseModel):
     commitment: str = "confirmed"
 
 
+class DatabaseConfig(BaseModel):
+    url: str = Field(default="sqlite+aiosqlite:///./optimizer.db")
+    echo: bool = Field(default=False)
+
+
 class AppConfig(BaseModel):
     network: NetworkConfig
     wallets: List[WalletConfig]
     strategy: StrategyConfig
     notifications: NotificationConfig = NotificationConfig()
     analytics: AnalyticsConfig = AnalyticsConfig()
+    database: DatabaseConfig = DatabaseConfig()
 
     @classmethod
     def load(cls, path: str | Path) -> "AppConfig":
-        data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+        """Load configuration from YAML file with environment variable substitution.
+
+        Supports ${VAR_NAME} or ${VAR_NAME:default} syntax for env var substitution.
+
+        Args:
+            path: Path to configuration file
+
+        Returns:
+            Loaded and validated configuration
+        """
+        config_text = Path(path).read_text(encoding="utf-8")
+
+        # Substitute environment variables
+        config_text = cls._substitute_env_vars(config_text)
+
+        data = yaml.safe_load(config_text)
         return cls(**data)
+
+    @staticmethod
+    def _substitute_env_vars(text: str) -> str:
+        """Substitute ${VAR} or ${VAR:default} with environment variable values.
+
+        Args:
+            text: Text with env var placeholders
+
+        Returns:
+            Text with substituted values
+        """
+        pattern = re.compile(r'\$\{([^}:]+)(?::([^}]+))?\}')
+
+        def replace(match):
+            var_name = match.group(1)
+            default_value = match.group(2) if match.group(2) is not None else ""
+            return os.getenv(var_name, default_value)
+
+        return pattern.sub(replace, text)
 
 
 __all__ = ["AppConfig", "WalletConfig", "StrategyConfig", "NotificationConfig"]

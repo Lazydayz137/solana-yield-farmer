@@ -1,15 +1,15 @@
 network:
-  rpc_endpoint: https://api.mainnet-beta.solana.com
+  rpc_endpoint: ${SOLANA_RPC_URL:https://api.mainnet-beta.solana.com}
   commitment: confirmed
 
 wallets:
   - name: primary
-    address: 9u6e...demo
-    private_key_path: secrets/primary.json
+    address: ${WALLET_1_ADDRESS:YOUR_WALLET_ADDRESS_HERE}
+    private_key_path: ${WALLET_1_KEY_PATH:secrets/primary.json}
     max_allocation_pct: 0.6
   - name: treasury
-    address: 4sd8...demo
-    private_key_path: secrets/treasury.json
+    address: ${WALLET_2_ADDRESS:YOUR_WALLET_ADDRESS_HERE}
+    private_key_path: ${WALLET_2_KEY_PATH:secrets/treasury.json}
     max_allocation_pct: 0.4
 
 strategy:
@@ -17,17 +17,20 @@ strategy:
   rotation_threshold_bps: 75
   min_apy: 6.0
   slippage_bps: 30
-  target_vaults: ["RAY-USDC", "SOL-USDC", "BONK-USDC"]
+  target_vaults: []  # Empty = all vaults, or specify like ["RAY-USDC", "SOL-USDC"]
 
 notifications:
   telegram:
-    enabled: true
-    bot_token: "<bot-token>"
-    chat_id: "<chat-id>"
+    enabled: ${TELEGRAM_ENABLED:false}
+    bot_token: ${TELEGRAM_BOT_TOKEN:}
+    chat_id: ${TELEGRAM_CHAT_ID:}
   discord:
-    enabled: false
-    webhook_url: ""
+    enabled: ${DISCORD_ENABLED:false}
+    webhook_url: ${DISCORD_WEBHOOK_URL:}
 
 analytics:
   dashboard_refresh_seconds: 30
 
+database:
+  url: ${DATABASE_URL:sqlite+aiosqlite:///./optimizer.db}
+  echo: false

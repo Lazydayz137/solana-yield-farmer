@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 
 from optimizer.analytics.dashboard import DashboardSnapshot, render_dashboard
@@ -31,48 +31,91 @@ class OptimizerEngine:
             config.notifications.discord.enabled,
         )
         self.positions: Dict[str, VaultPosition] = {}
-        self._last_harvest = datetime.utcnow() - timedelta(
+        self._last_harvest = datetime.now(timezone.utc) - timedelta(
             minutes=config.strategy.harvest_interval_minutes
         )
 
     async def sync_vaults(self) -> List[Vault]:
-        vaults: List[Vault] = []
-        for provider in self.providers:
-            vaults.extend(await provider.fetch_vaults())
-        LOGGER.info("Fetched %s vaults", len(vaults))
-        return vaults
+        """Fetch vaults from all providers concurrently."""
+        try:
+            results = await asyncio.gather(
+                *[provider.fetch_vaults() for provider in self.providers],
+                return_exceptions=True
+            )
+            vaults: List[Vault] = []
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    LOGGER.error("Provider %s failed: %s", self.providers[i].name, result)
+                else:
+                    vaults.extend(result)
+            LOGGER.info("Fetched %s vaults from %s providers", len(vaults), len(self.providers))
+            return vaults
+        except Exception as e:
+            LOGGER.error("Failed to sync vaults: %s", e)
+            return []
 
     async def maybe_harvest(self) -> List[VaultPosition]:
-        now = datetime.utcnow()
+        """Harvest positions if interval has elapsed."""
+        now = datetime.now(timezone.utc)
         if now - self._last_harvest < timedelta(minutes=self.config.strategy.harvest_interval_minutes):
             return []
         self._last_harvest = now
         harvested = []
         for pos in self.positions.values():
             yield_usd = pos.accrued_yield
-            harvested.append(pos)
-            LOGGER.info("Harvested %.2f USD from %s", yield_usd, pos.vault.name)
+            if yield_usd > 0:
+                pos.total_harvested_usd += yield_usd
+                pos.last_harvest = now
+                harvested.append(pos)
+                LOGGER.info("Harvested %.2f USD from %s (total: %.2f)",
+                           yield_usd, pos.vault.name, pos.total_harvested_usd)
         if harvested:
-            await self._notify(f"Harvested {len(harvested)} vaults at {now.isoformat()}")
+            total_yield = sum(p.accrued_yield for p in harvested)
+            await self._notify(
+                f"🌾 Harvested {len(harvested)} positions\n"
+                f"Total yield: ${total_yield:,.2f}"
+            )
         return harvested
 
     async def rebalance(self, vaults: List[Vault]) -> None:
+        """Rebalance positions to highest APY vault if threshold met."""
         if not vaults:
             return
-        vaults = [v for v in vaults if v.name in self.config.strategy.target_vaults or not self.config.strategy.target_vaults]
-        if not vaults:
+
+        # Filter by target vaults if specified
+        filtered_vaults = [
+            v for v in vaults
+            if not self.config.strategy.target_vaults or v.name in self.config.strategy.target_vaults
+        ]
+
+        # Apply minimum APY filter
+        filtered_vaults = [v for v in filtered_vaults if v.apy >= self.config.strategy.min_apy]
+
+        if not filtered_vaults:
+            LOGGER.warning("No vaults meet criteria (min APY: %.2f%%)", self.config.strategy.min_apy)
             return
-        best = max(vaults, key=lambda v: v.apy)
+
+        best = max(filtered_vaults, key=lambda v: v.apy)
         target_amount = sum(w.max_allocation_pct for w in self.config.wallets)
-        allocation = target_amount * 100_000  # mock capital pool
+        allocation = target_amount * 100_000  # TODO: Replace with real wallet balance
 
+        # Check if rotation is needed (BPS comparison fixed)
         current = self.positions.get(best.name)
-        if current and abs(current.vault.apy - best.apy) < self.config.strategy.rotation_threshold_bps / 100:
-            return
+        if current:
+            apy_diff_bps = abs(current.vault.apy - best.apy) * 100  # Convert % to BPS
+            if apy_diff_bps < self.config.strategy.rotation_threshold_bps:
+                LOGGER.debug("APY difference %.2f BPS below threshold %d BPS",
+                            apy_diff_bps, self.config.strategy.rotation_threshold_bps)
+                return
 
-        self.positions[best.name] = VaultPosition(wallet=self.config.wallets[0].name, vault=best, amount_usd=allocation)
+        self.positions[best.name] = VaultPosition(
+            wallet=self.config.wallets[0].name,
+            vault=best,
+            amount_usd=allocation
+        )
         await self._notify(
-            f"Rotated capital into {best.name} on {best.platform} (APY {best.apy:.2f}%)"
+            f"🔄 Rotated to {best.name} ({best.platform})\n"
+            f"APY: {best.apy:.2f}% | TVL: ${best.tvl_usd:,.0f}"
         )
 
     async def render(self, vaults: List[Vault]) -> None:
